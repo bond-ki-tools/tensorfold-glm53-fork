@@ -398,6 +398,9 @@ pub const State = struct {
     prompt_hidden: u64, // first-draft row owned and charged by this sequence arena
     table: u64 = 0, // on pages: its page table (i32, `pages` entries), else 0
     pages: []const u32 = &.{}, // on pages: the page ids its table holds, in row order (none while no stream holds it)
+    ltable: u64 = 0, // port note (af9777b49): gate 4 — sharded (TF_GLM_KV_SHARD): its latent table (i32 this rank's latent pages, `pages` entries)
+    lpages: []const u32 = &.{}, // sharded: the latent pages that table holds (cuda_kv_shard.latentIds)
+    hold: ?@import("cuda_kv_shard.zig").Hold = null, // sharded: which ranks hold its latent rows (null: unsharded)
 
     pub fn init(gpa: std.mem.Allocator, d: *const cuda.Driver, w: *const weights.Weights, capacity: usize) !State {
         return initFormat(gpa, d, w, capacity, false);
