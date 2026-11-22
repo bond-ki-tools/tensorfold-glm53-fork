@@ -287,7 +287,10 @@ pub const Engine = struct {
 
     /// The shard's rooms and the forward's place under TF_GLM_KV_SHARD (port note (af9777b49): gate 2, the fork's bodies against the 1.3.2 engine).
     fn initKvShard(e: *Engine) !void {
-        const rows = @import("cuda_kv_shard_attn.zig").rowsOf(e);
+        e.kv_room = null;
+        e.kv_stage = null;
+        errdefer e.freeKvShard();
+        const rows = @max(fw.prefill_rows, shared_rows);
         const hl = e.share.mla.len();
         const half = rows * hl * e.c.kv_lora * 2;
         e.kv_room = try cuda.DeviceBuffer.alloc(e.d, kv_attn.roomBytes(rows, hl, e.c.kv_lora));
