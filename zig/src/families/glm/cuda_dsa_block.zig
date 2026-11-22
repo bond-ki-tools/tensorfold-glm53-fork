@@ -160,6 +160,46 @@ pub fn attend(k: Kernels, stream: cuda.Stream, l: Layer, c: Caches, s: Scratch, 
     }
 }
 
+/// attend's writes and selection without attention — for `rows` rows whose latent rows live on the other rank
+/// (cuda_kv_shard_attn's owner passes the results). Port note (af9777b49): gate 4 — the fork's shard additions.
+pub fn attendNoLatent(k: Kernels, stream: cuda.Stream, l: Layer, c: Caches, s: Scratch, r0: usize, rows: usize, pos: u64, host_pos: usize) !Scratch {
+    var v = s;
+    v.lat += r0 * l.lw * 2;
+    v.ikr += r0 * (l.index.d + l.index.heads) * 2;
+    v.igr += r0 * l.index.d * 4;
+    v.qa += r0 * l.heads * l.lw * 2;
+    v.ol += r0 * l.heads * l.lw * 2;
+    v.qi += r0 * l.index.heads * l.index.d * 2;
+    try writeKeys(k, stream, l, c, v, rows, pos);
+    const t, const tk = try tables(l, c);
+    _ = t;
+    const ix = l.index;
+    if (sparseRows(l, host_pos, rows)) try sparse.selectTokensProfile(k.set, k.ops, stream, v.qi, v.ikr + ix.d * 2, ix.d + ix.heads, c.pk, tk, pos, host_pos, rows, ix.heads, ix.d, c.pk_rows - 2, v.select, v.tokens, v.counts, k.split, k.prof);
+    return v;
+}
+
+/// attend's attention alone, for `rows` rows whose latents, keys and token lists are in place: the queries at `qa`, the
+/// outputs into `ol` ([rows][heads][lw] bf16), the lists at `tokens` and `counts` (sparse rows). Owner-computed
+/// attention (cuda_kv_shard_attn) runs it for the other rank's heads. Port note (af9777b49): gate 4.
+pub fn attendOnly(k: Kernels, stream: cuda.Stream, l: Layer, c: Caches, s: Scratch, rows: usize, pos: u64, host_pos: usize, nch: usize, part_rows: usize, qa: u64, ol: u64, tokens: u64, counts: u64) !void {
+    var v = s;
+    v.qa = qa;
+    v.ol = ol;
+    const scale: f32 = @floatCast(std.math.pow(f64, @floatFromInt(l.qk), -0.5));
+    if (host_pos < l.dense_limit) {
+        const stamp = prof.span(k.prof, stream, .mla);
+        try denseAttention(k, stream, l, c, v, pos, rows, nch, part_rows, scale);
+        stamp.end();
+    }
+    if (sparseRows(l, host_pos, rows)) {
+        const stamp = prof.span(k.prof, stream, .mla);
+        defer stamp.end();
+        const t, const tk = try tables(l, c);
+        _ = tk;
+        try latent.sparseAttentionFormat(k.set, stream, qa, c.lc, c.ls, t, tokens, counts, sparse.width, v.partials, ol, rows, l.heads, l.lw, scale);
+    }
+}
+
 /// A prompt MTP chunk's block: every row's caches, then the last row's attention and o_proj partial into `out` row 0.
 pub fn blockLastRow(k: Kernels, stream: cuda.Stream, l: Layer, c: Caches, s: Scratch, x: u64, x_stride: usize, rows: usize, pos: u64, host_pos: usize, nch: usize, out: u64) !void {
     if (rows == 0) return error.BadWindow;
