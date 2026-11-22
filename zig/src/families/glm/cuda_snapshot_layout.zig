@@ -41,8 +41,9 @@ pub const Plan = struct {
     }
 
     /// A restore's plan: the kept state's own `cur` bits say which half it carries (the slot's may differ by now).
-    pub fn initFor(st: *const State, c: *const Config, at: usize, head: ?usize, shared: usize, cur: []const u1) !Plan {
-        return make(st, c, at, head, shared, false, true, halfOf(cur, st.kda_layers, liveHalfEnabled())); // port note (af9777b49): gate 5d
+    /// `latent` (false): the sharded keep's plan without its latent rows — the owner copies those alone. Port note (af9777b49): gate 5d.
+    pub fn initFor(st: *const State, c: *const Config, at: usize, head: ?usize, shared: usize, latent: bool, cur: []const u1) !Plan {
+        return make(st, c, at, head, shared, false, latent, halfOf(cur, st.kda_layers, liveHalfEnabled()));
     }
 
     /// The plan with a given half (tests and tools): both halves for null.

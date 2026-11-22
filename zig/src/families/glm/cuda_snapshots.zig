@@ -45,8 +45,17 @@ pub fn keepAs(e: anytype, id: u64) !void {
     if (e.cur.st.pending != 0 or e.cur.st.mtp_len > e.cur.st.pos + @import("cuda_state.zig").window_rows)
         return error.NotAtMark;
     const pool = if (e.snap_pages) |*p| p else return error.NoSnapshotCache;
-    const plan = try layout.Plan.init(&e.cur.st, &e.c, e.cur.st.pos, if (e.mtp) e.cur.st.mtp_len else null, heldPages(e, e.cur.st.pos));
-    var lease = try pool.take(plan.len);
+    const hold = if (e.settings.kv_shard.on) e.cur.st.hold else null; // port note (af9777b49): gate 5d — the shard's keep
+    // TF_GLM_KV_SHARD: the latent rows on their owner's copy alone; every rank leases the whole state's bytes.
+    const own = @import("cuda_kv_shard_keep.zig").keepsLatent(hold, e.share.rank);
+    const head = if (e.mtp) e.cur.st.mtp_len else null;
+    const held = heldPages(e, e.cur.st.pos);
+    var plan = if (own)
+        try layout.Plan.initFor(&e.cur.st, &e.c, e.cur.st.pos, head, held, false, e.cur.st.cur)
+    else
+        try layout.Plan.init(&e.cur.st, &e.c, e.cur.st.pos, head, held);
+    const latent_bytes = if (own) 0 else (try layout.Plan.initFor(&e.cur.st, &e.c, e.cur.st.pos, head, held, true, e.cur.st.cur)).len - plan.len;
+    var lease = try pool.take(plan.len + latent_bytes);
     errdefer {
         cuda.completion.drain(e.d, e.stream, "a failed GLM snapshot copy did not drain");
         pool.give(&lease);
@@ -54,15 +63,19 @@ pub fn keepAs(e: anytype, id: u64) !void {
     const cur = try e.gpa.dupe(u1, e.cur.st.cur);
     errdefer e.gpa.free(cur);
     try pool.move(e.stream, &lease, &plan, true);
+    if (latent_bytes > 0) { // this rank keeps the latent rows too: the plan's own walk
+        var with_latent = try layout.Plan.initFor(&e.cur.st, &e.c, e.cur.st.pos, head, held, true, e.cur.st.cur);
+        try pool.move(e.stream, &lease, &with_latent, true);
+    }
     try e.stream.synchronize();
-    e.snaps.putAssumeCapacityNoClobber(id, .{ .lease = lease, .len = plan.len, .pos = e.cur.st.pos, .mtp_len = e.cur.st.mtp_len, .cur = cur, .bases = .{ e.cur.st.base, e.cur.st.mtp_base }, .shared = plan.shared });
+    e.snaps.putAssumeCapacityNoClobber(id, .{ .lease = lease, .len = plan.len, .pos = e.cur.st.pos, .mtp_len = e.cur.st.mtp_len, .cur = cur, .bases = .{ e.cur.st.base, e.cur.st.mtp_base }, .shared = plan.shared, .home = if (hold) |h| h.owner else null });
 }
 
 pub fn restore(e: anytype, id: u64) !void {
     const s = e.snaps.getPtr(id) orelse return error.NoKeptState;
     const pool = if (e.snap_pages) |*p| p else return error.NoSnapshotCache;
     // the kept state's own parity picks the half a live-half keep carries; the slot's dead half stays as it is
-    const plan = try layout.Plan.initFor(&e.cur.st, &e.c, s.pos, if (e.mtp) s.mtp_len else null, s.shared, s.cur);
+    const plan = try layout.Plan.initFor(&e.cur.st, &e.c, s.pos, if (e.mtp) s.mtp_len else null, s.shared, true, s.cur); // port note (af9777b49): gate 5d — a restore carries the latent rows it holds
     if (plan.len != s.len) return error.SnapshotSize;
     errdefer cuda.completion.drain(e.d, e.stream, "a failed GLM snapshot restore did not drain");
     try pool.move(e.stream, &s.lease, &plan, false);
