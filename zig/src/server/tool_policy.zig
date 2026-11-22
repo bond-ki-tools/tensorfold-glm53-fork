@@ -114,7 +114,13 @@ pub const TextFilter = struct {
 /// ``parallel_tool_calls: false`` keeps one call and hides call markup from streamed prose.
 pub const Policy = struct {
     single: bool = false,
+    guard: bool = false, // port note (af9777b49): gate 6 — the fork's TF_TOOL_CALL_GUARD — hides call markup from a reply to a request that offers no tools
+    drop_rejected: bool = false, // port note (af9777b49): with tools offered: well-formed calls to unoffered tools leave the reply (tool_parse.Options)
     filter: TextFilter = .{},
+
+    pub fn filtering(p: *const Policy) bool {
+        return p.single or p.guard;
+    }
 
     pub fn maxCalls(p: *const Policy) ?usize {
         return if (p.single) 1 else null;

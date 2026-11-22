@@ -4,6 +4,7 @@ const json = @import("json");
 const errors = @import("errors.zig");
 const fields = @import("fields.zig");
 const chat = @import("chat.zig");
+const tool_guard = @import("tool_guard.zig"); // port note (af9777b49): gate 6 — the fork's TF_TOOL_CALL_GUARD
 const compact = @import("compact.zig");
 const grammar = @import("grammar.zig");
 const messages = @import("messages.zig");
@@ -112,6 +113,7 @@ pub fn plan(srv: *Server, cx: *Cx, is_chat: bool, raw: Value, format: ?[]const u
     if (is_chat) {
         input.messages = try messages.normalizeWith(cx, body.get("messages"), "system", srv.needs_user_after_tool, srv.media());
         input.tools = if (srv.text.native_deepseek) try @import("deepseek_request.zig").active(cx, body.get("tools"), body.get("tool_choice")) else try tool_specs.active(cx, body.get("tools"), body.get("tool_choice"));
+        if (tool_guard.on() and input.tools.len == 0 and tool_guard.usedTools(input.messages)) input.messages = try tool_guard.withNote(cx.a, input.messages); // port note (af9777b49): gate 6 — the fork's TF_TOOL_CALL_GUARD
     } else if (body.get("messages")) |m| if (m == .array and m.array.len > 0) {
         input.messages = try messages.normalizeWith(cx, m, "system", srv.needs_user_after_tool, srv.media());
     };
@@ -143,6 +145,7 @@ pub fn plan(srv: *Server, cx: *Cx, is_chat: bool, raw: Value, format: ?[]const u
     input.prompt_logprobs = try fields.promptLogprobs(cx, body, !is_chat, streamed, srv.info.capability(.prompt_logprobs));
     input.logprobs = logprobs;
     var policy: tool_stream.Policy = .{};
+    if (tool_guard.on() and is_chat and input.tools.len > 0) policy.drop_rejected = true; // port note (af9777b49): gate 6 — the guard hides unoffered calls' markup
     if (body.field("parallel_tool_calls")) |p| {
         if (p != .bool) return cx.refuse("parallel_tool_calls must be a boolean");
         policy.single = !p.bool;

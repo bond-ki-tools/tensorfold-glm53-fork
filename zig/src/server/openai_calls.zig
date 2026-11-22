@@ -23,7 +23,7 @@ pub fn attach(r: anytype, reply: *chat.Reply) Allocator.Error!?[]Value {
         reply.tool_calls_streamed = false;
         return if (r.plan.policy.single and calls.len > 1) calls[0..1] else calls;
     }
-    const parsed = try tool_parse.parse(r.a, reply.content, tools, r.plan.policy.maxCalls());
+    const parsed = try tool_parse.parseWith(r.a, reply.content, tools, r.plan.policy.maxCalls(), .{ .hide_unoffered = r.plan.policy.drop_rejected }); // port note (af9777b49): gate 6 — the guard's unoffered-call hiding
     if (parsed.rejected_envelopes > 0) {
         log.line("warning: kept {d} malformed or unoffered tool envelopes as content", .{parsed.rejected_envelopes});
         r.srv.metrics.keptToolCalls(r.srv.io, parsed.kept_unoffered, parsed.kept_malformed);

@@ -101,7 +101,15 @@ pub fn envelopes(a: Allocator, text: []const u8) Allocator.Error![]Envelope {
 }
 
 /// ``parse_tool_calls_from_content``: the reply's content and its calls (null when it makes none).
+/// ``Options.hide_unoffered`` (TF_TOOL_CALL_GUARD with tools offered): a well-formed call to a tool the request did not offer
+/// leaves the content. Port note (af9777b49): gate 6 — the fork's guard, grafted.
+pub const Options = struct { hide_unoffered: bool = false };
+
 pub fn parse(a: Allocator, text: []const u8, tools: []const Value, max_calls: ?usize) Allocator.Error!Parsed {
+    return parseWith(a, text, tools, max_calls, .{});
+}
+
+pub fn parseWith(a: Allocator, text: []const u8, tools: []const Value, max_calls: ?usize, opts: Options) Allocator.Error!Parsed {
     if (tools.len == 0) return .{ .content = text, .calls = null };
     var known: std.StringArrayHashMapUnmanaged([]const u8) = .empty;
     for (tools) |tool| {
@@ -156,7 +164,8 @@ pub fn parse(a: Allocator, text: []const u8, tools: []const Value, max_calls: ?u
             break :blk if (unoffered) .unoffered else .none;
         };
         if (reject != .none) {
-            try residue.appendSlice(a, text[env.start..env.end]);
+            const hide = opts.hide_unoffered and reject == .unoffered; // port note (af9777b49): gate 6 — the guard hides the unoffered call's envelope
+            if (!hide) try residue.appendSlice(a, text[env.start..env.end]);
             rejected += 1;
             if (reject == .unoffered) kept_unoffered += 1 else kept_malformed += 1;
             continue;
