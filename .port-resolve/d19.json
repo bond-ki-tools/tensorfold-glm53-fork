@@ -1,0 +1,1 @@
+{"path": "zig/src/cuda/exl3_experts.zig", "decisions": ["        e.plan_finish_after = try e.mod.function(\"tf_exl3_plan_finish_after\");\n        e.group_fn = try e.mod.function(\"tf_exl3_group\"); // port note (af9777b49): the fork's field name stands; upstream renamed it `group`\n        try e.group_fn.allowDynamicShared(64 * 1024);", "@F"]}
