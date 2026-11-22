@@ -190,7 +190,7 @@ test "every media limit is part of the ranks' agreement" {
 test "every scheduling and identity field that differs stops the ranks" {
     const zero = Fingerprint.of(2, 0, .{}, 8192, true, @splat(0), @splat(0), hashBytes("/same"));
     const one = Fingerprint.of(2, 1, .{}, 8192, true, @splat(0), @splat(0), hashBytes("/same"));
-    inline for (.{ "layout", "world", "rank", "pages", "split", "kda_wide", "kda_pad", "kv_live_half", "pieces", "solo", "pair", "layers", "mtp", "vision", "video_tokens", "max_images", "max_videos", "max_frames", "roce_multi", "roce_wide", "kv_host", "capacity", "heat_high", "heat_low", "kv_host_gib" }) |name| {
+    inline for (.{ "layout", "world", "rank", "pages", "split", "kda_wide", "kda_pad", "kv_share", "kv_live_half", "pieces", "solo", "pair", "chunk", "layers", "mtp", "vision", "video_tokens", "max_images", "max_videos", "max_frames", "roce_multi", "roce_wide", "kv_host", "numerics", "capacity", "heat_high", "heat_low", "kv_host_gib" }) |name| { // port note (af9777b49): upstream's kda_pad/solo/roce/kv_host beside the fork's kv_share/chunk/numerics
         var all = [_]Fingerprint{ zero, one };
         @field(all[1], name) += 1;
         try std.testing.expectEqual(@field(Fingerprint.Field, name), mismatch(&all).?.field);
@@ -392,28 +392,6 @@ test "TF_GLM_OVERLAP_PIECES: unset, 8 under TF_GLM_CHUNK_SOLO=4096 with TF_GLM_R
     try std.testing.expectEqual(@as(u32, 3), (try Settings.read(Reader.none, &problem)).pieces);
 }
 
-test "TF_GLM_KV_LIVE_HALF: off by default, 0 or 1, a typo refused, and every rank must agree (their keeps' plans differ)" {
-    const Reader = struct {
-        fn absent(_: [:0]const u8) ?[]const u8 {
-            return null;
-        }
-        fn on(key: [:0]const u8) ?[]const u8 {
-            return if (std.mem.eql(u8, key, "TF_GLM_KV_LIVE_HALF")) "1" else null;
-        }
-        fn bad(key: [:0]const u8) ?[]const u8 {
-            return if (std.mem.eql(u8, key, "TF_GLM_KV_LIVE_HALF")) "yes" else null;
-        }
-    };
-    var problem: []const u8 = "";
-    try std.testing.expect(!(try Settings.read(Reader.absent, &problem)).kv_live_half);
-    const on = try Settings.read(Reader.on, &problem);
-    try std.testing.expect(on.kv_live_half);
-    try std.testing.expectError(error.BadSetting, Settings.read(Reader.bad, &problem));
-    try std.testing.expectEqualStrings("TF_GLM_KV_LIVE_HALF: 0 or 1", problem);
-    const all = [_]Fingerprint{ Fingerprint.of(2, 0, .{}, 8192, true, @splat(0), @splat(0), @splat(0)), Fingerprint.of(2, 1, on, 8192, true, @splat(0), @splat(0), @splat(0)) };
-    try std.testing.expectEqual(Mismatch{ .field = .kv_live_half, .rank = 1 }, mismatch(&all).?);
-}
-
 test "prompt K experiment is explicit and all ranks must agree" {
     const Reader = struct {
         fn absent(_: [:0]const u8) ?[]const u8 {
@@ -468,6 +446,44 @@ test "TF_GLM_PROMPT_PAIR: on by default, 0 or 1, and every rank must agree (the 
     try std.testing.expectEqual(Mismatch{ .field = .pair, .rank = 1 }, mismatch(&all).?);
 }
 
+test "TF_GLM_CHUNK_SOLO: off by default, 4096 turns busy steps of TF_GLM_CHUNK rows on (2048, or 1024), the rest refused by name, and every rank must agree" {
+    const Reader = struct {
+        fn absent(_: [:0]const u8) ?[]const u8 {
+            return null;
+        }
+        fn on(key: [:0]const u8) ?[]const u8 {
+            return if (std.mem.eql(u8, key, "TF_GLM_CHUNK_SOLO")) "4096" else null;
+        }
+        fn quarter(key: [:0]const u8) ?[]const u8 {
+            if (std.mem.eql(u8, key, "TF_GLM_CHUNK_SOLO")) return "4096";
+            return if (std.mem.eql(u8, key, "TF_GLM_CHUNK")) "1024" else null;
+        }
+        fn upstreamOff(key: [:0]const u8) ?[]const u8 {
+            return if (std.mem.eql(u8, key, "TF_GLM_CHUNK_SOLO")) "2048" else null; // upstream's off: its 2,048-row grid everywhere
+        }
+        fn dangling(key: [:0]const u8) ?[]const u8 {
+            return if (std.mem.eql(u8, key, "TF_GLM_CHUNK")) "2048" else null;
+        }
+        fn odd(key: [:0]const u8) ?[]const u8 {
+            if (std.mem.eql(u8, key, "TF_GLM_CHUNK_SOLO")) return "4096";
+            return if (std.mem.eql(u8, key, "TF_GLM_CHUNK")) "512" else null;
+        }
+    };
+    var problem: []const u8 = "";
+    try std.testing.expectEqual(@as(u32, 0), (try Settings.read(Reader.absent, &problem)).chunk);
+    const on = try Settings.read(Reader.on, &problem);
+    try std.testing.expectEqual(@as(u32, 2048), on.chunk);
+    try std.testing.expectEqual(@as(u32, 1024), (try Settings.read(Reader.quarter, &problem)).chunk);
+    const off = try Settings.read(Reader.upstreamOff, &problem); // port note (af9777b49): 2048 is upstream's solo buffers alone, no busy step
+    try std.testing.expect(off.solo and off.chunk == 0);
+    try std.testing.expectError(error.BadSetting, Settings.read(Reader.dangling, &problem));
+    try std.testing.expectEqualStrings("TF_GLM_CHUNK needs TF_GLM_CHUNK_SOLO=4096", problem);
+    try std.testing.expectError(error.BadSetting, Settings.read(Reader.odd, &problem));
+    try std.testing.expect(std.mem.startsWith(u8, problem, "TF_GLM_CHUNK: 2048 or 1024"));
+    const all = [_]Fingerprint{ Fingerprint.of(2, 0, .{}, 8192, true, @splat(0), @splat(0), @splat(0)), Fingerprint.of(2, 1, on, 8192, true, @splat(0), @splat(0), @splat(0)) };
+    try std.testing.expectEqual(Mismatch{ .field = .chunk, .rank = 1 }, mismatch(&all).?);
+}
+
 test "TF_GLM_INDEX_SPLIT: 2048 by default, 0 for never, a position, and a refusal naming a value that is not one" {
     const Reader = struct {
         fn absent(_: [:0]const u8) ?[]const u8 {
@@ -491,7 +507,109 @@ test "TF_GLM_INDEX_SPLIT: 2048 by default, 0 for never, a position, and a refusa
     try std.testing.expectEqualStrings("TF_GLM_INDEX_SPLIT: the position a prompt chunk's indexer rows split from, or 0 for never", problem);
 }
 
-test "TF_GLM_ROCE_MULTI: off by default, 1 and 0, and refusals naming a bad value or what the wire needs" {
+fn numeric(name: [:0]const u8) ?[]const u8 {
+    if (std.mem.eql(u8, name, "TF_GLM_W8A8")) return "1";
+    if (std.mem.eql(u8, name, "TF_GLM_ABSORB_MMA")) return "0";
+    return null;
+}
+
+fn numeric32(name: [:0]const u8) ?[]const u8 {
+    if (std.mem.eql(u8, name, "TF_GLM_W8A8")) return "32";
+    if (std.mem.eql(u8, name, "TF_GLM_ABSORB_MMA")) return "1";
+    return null;
+}
+
+fn numericTypo(name: [:0]const u8) ?[]const u8 {
+    if (std.mem.eql(u8, name, "TF_GLM_ABSORB_MMA")) return "on";
+    return null;
+}
+
+test "the opt-in prompt numerics: off by default, read by name, in the fingerprint, a bad value refused" {
+    var problem: []const u8 = "";
+    const none = try Settings.read(&typo_free, &problem);
+    try std.testing.expectEqual(@as(u32, 0), none.numerics.bits());
+    const s = try Settings.read(&numeric, &problem);
+    try std.testing.expect(s.numerics.w8a8 and !s.numerics.absorb_mma);
+    const f = Fingerprint.of(2, 0, s, 8192, true, @splat(0), @splat(0), hashBytes("/c"));
+    try std.testing.expectEqual(s.numerics.bits(), f.numerics);
+    const g = try Settings.read(&numeric32, &problem);
+    try std.testing.expect(g.numerics.w8a8 and g.numerics.w8a8_g32 and g.numerics.absorb_mma);
+    try std.testing.expectError(error.BadSetting, Settings.read(&numericTypo, &problem));
+    try std.testing.expectEqualStrings("TF_GLM_ABSORB_MMA: 0 or 1", problem);
+}
+
+fn typo_free(_: [:0]const u8) ?[]const u8 {
+    return null;
+}
+
+fn sharded(name: [:0]const u8) ?[]const u8 {
+    if (std.mem.eql(u8, name, "TF_GLM_KV_SHARD")) return "1";
+    if (std.mem.eql(u8, name, "TF_GLM_KV_SHARD_TWINS")) return "0";
+    if (std.mem.eql(u8, name, "TF_GLM_KV_SHARD_CHECK")) return "64";
+    return null;
+}
+
+fn shardTypo(name: [:0]const u8) ?[]const u8 {
+    if (std.mem.eql(u8, name, "TF_GLM_KV_SHARD")) return "1";
+    if (std.mem.eql(u8, name, "TF_GLM_KV_SHARD_CHECK")) return "often";
+    return null;
+}
+
+fn knobsOff(name: [:0]const u8) ?[]const u8 {
+    if (std.mem.eql(u8, name, "TF_GLM_KV_SHARD_CARRY")) return "maybe"; // off: the knobs are never read
+    return null;
+}
+
+test "TF_GLM_KV_SHARD: read with its knobs, refused by name on a typo, and in the fingerprint only when on" {
+    var problem: []const u8 = "";
+    const s = try Settings.read(&sharded, &problem);
+    try std.testing.expect(s.kv_shard.on and s.kv_shard.carry and !s.kv_shard.twins and s.kv_shard.check == 64);
+    try std.testing.expectError(error.BadSetting, Settings.read(&shardTypo, &problem));
+    try std.testing.expect(std.mem.indexOf(u8, problem, "TF_GLM_KV_SHARD_CHECK") != null);
+    const off = try Settings.read(&knobsOff, &problem);
+    try std.testing.expect(!off.kv_shard.on);
+    const h0: [32]u8 = @splat(1);
+    const f0 = Fingerprint.of(2, 0, .{}, 8192, true, h0, h0, hashBytes("/c"));
+    try std.testing.expectEqual(@as(u32, 0), f0.kv_shard);
+    try std.testing.expectEqual(@as(u32, 0), f0.kv_shard_check);
+    try std.testing.expectEqual(@as(u32, 19), f0.layout);
+    var all = [_]Fingerprint{ f0, Fingerprint.of(2, 1, s, 8192, true, h0, h0, hashBytes("/c")) };
+    try std.testing.expectEqual(Mismatch{ .field = .kv_shard, .rank = 1 }, mismatch(&all).?); // on one rank only
+    all[0] = Fingerprint.of(2, 0, s, 8192, true, h0, h0, hashBytes("/c"));
+    try std.testing.expect(mismatch(&all) == null);
+    var other = s;
+    other.kv_shard.check = 1024;
+    all[1] = Fingerprint.of(2, 1, other, 8192, true, h0, h0, hashBytes("/c"));
+    try std.testing.expectEqual(Mismatch{ .field = .kv_shard_check, .rank = 1 }, mismatch(&all).?);
+    other = s;
+    other.kv_shard.twins = true;
+    all[1] = Fingerprint.of(2, 1, other, 8192, true, h0, h0, hashBytes("/c"));
+    try std.testing.expectEqual(Mismatch{ .field = .kv_shard, .rank = 1 }, mismatch(&all).?);
+}
+
+test "TF_GLM_L2PF: read with the settings, carried in the fingerprint, and ranks that prefetch differently disagree" {
+    const Reader = struct {
+        fn on(key: [:0]const u8) ?[]const u8 {
+            return if (std.mem.eql(u8, key, "TF_GLM_L2PF")) "1" else null;
+        }
+        fn bad(key: [:0]const u8) ?[]const u8 {
+            return if (std.mem.eql(u8, key, "TF_GLM_L2PF")) "2" else null;
+        }
+    };
+    var problem: []const u8 = "";
+    const s = try Settings.read(Reader.on, &problem);
+    try std.testing.expect(s.l2pf.on);
+    try std.testing.expectError(error.BadSetting, Settings.read(Reader.bad, &problem));
+    try std.testing.expectEqualStrings("TF_GLM_L2PF: 0 or 1", problem);
+    const h: [32]u8 = @splat(0);
+    var all = [_]Fingerprint{ Fingerprint.of(2, 0, s, 8192, true, h, h, h), Fingerprint.of(2, 1, s, 8192, true, h, h, h) };
+    try std.testing.expectEqual([4]u32{ 1, 12, 2, 150 }, all[0].l2pf);
+    try std.testing.expectEqual(@as(?Mismatch, null), mismatch(&all));
+    all[1].l2pf[3] = 0; // rank 1 unpaced
+    try std.testing.expectEqual(Mismatch{ .field = .l2pf, .rank = 1 }, mismatch(&all).?);
+}
+
+test "TF_GLM_ROCE_MULTI: off by default, 1 and 0, and refusals naming a bad value or what the wire needs" { // port note (af9777b49): upstream's test, its header restored after the merge splice
     const Reader = struct {
         fn absent(_: [:0]const u8) ?[]const u8 {
             return null;
@@ -561,24 +679,70 @@ test "TF_GLM_KV_HOST, _SHARED and _GIB: off by default, the choices, and refusal
     try std.testing.expectEqual(Fingerprint.Field.kv_host, mismatch(&all).?.field);
 }
 
-test "TF_GLM_L2PF: read with the settings, carried in the fingerprint, and ranks that prefetch differently disagree" {
+test "TF_GLM_KV_LIVE_HALF: off by default, 0 or 1, a typo refused, and every rank must agree (their keeps' plans differ)" { // port note (af9777b49): the fork's test, its header and reader restored after the merge splice
     const Reader = struct {
+        fn absent(_: [:0]const u8) ?[]const u8 {
+            return null;
+        }
         fn on(key: [:0]const u8) ?[]const u8 {
-            return if (std.mem.eql(u8, key, "TF_GLM_L2PF")) "1" else null;
+            return if (std.mem.eql(u8, key, "TF_GLM_KV_LIVE_HALF")) "1" else null;
         }
         fn bad(key: [:0]const u8) ?[]const u8 {
-            return if (std.mem.eql(u8, key, "TF_GLM_L2PF")) "2" else null;
+            return if (std.mem.eql(u8, key, "TF_GLM_KV_LIVE_HALF")) "yes" else null;
+        }
+    };
+    var problem: []const u8 = "";
+    try std.testing.expect(!(try Settings.read(Reader.absent, &problem)).kv_live_half);
+    const on = try Settings.read(Reader.on, &problem);
+    try std.testing.expect(on.kv_live_half);
+    try std.testing.expectError(error.BadSetting, Settings.read(Reader.bad, &problem));
+    try std.testing.expectEqualStrings("TF_GLM_KV_LIVE_HALF: 0 or 1", problem);
+    const all = [_]Fingerprint{ Fingerprint.of(2, 0, .{}, 8192, true, @splat(0), @splat(0), @splat(0)), Fingerprint.of(2, 1, on, 8192, true, @splat(0), @splat(0), @splat(0)) };
+    try std.testing.expectEqual(Mismatch{ .field = .kv_live_half, .rank = 1 }, mismatch(&all).?);
+}
+
+test "TF_GLM_KV_SHARE_UNTWINNED_PCT: 75 by default, 1 to 100 read, a value outside refused by name" {
+    const Reader = struct {
+        fn absent(_: [:0]const u8) ?[]const u8 {
+            return null;
+        }
+        fn pct(key: [:0]const u8) ?[]const u8 {
+            return if (std.mem.eql(u8, key, "TF_GLM_KV_SHARE_UNTWINNED_PCT")) "90" else null;
+        }
+        fn always(key: [:0]const u8) ?[]const u8 {
+            return if (std.mem.eql(u8, key, "TF_GLM_KV_SHARE_UNTWINNED_PCT")) "100" else null;
+        }
+        fn bad(key: [:0]const u8) ?[]const u8 {
+            return if (std.mem.eql(u8, key, "TF_GLM_KV_SHARE_UNTWINNED_PCT")) "0" else null;
+        }
+    };
+    var problem: []const u8 = "";
+    try std.testing.expectEqual(@as(u32, 75), (try Settings.read(Reader.absent, &problem)).share_untwinned_pct);
+    try std.testing.expectEqual(@as(u32, 90), (try Settings.read(Reader.pct, &problem)).share_untwinned_pct);
+    try std.testing.expectEqual(@as(u32, 100), (try Settings.read(Reader.always, &problem)).share_untwinned_pct);
+    try std.testing.expectError(error.BadSetting, Settings.read(Reader.bad, &problem));
+    try std.testing.expect(std.mem.indexOf(u8, problem, "TF_GLM_KV_SHARE_UNTWINNED_PCT") != null);
+}
+
+test "TF_KV_SHARE: read with the settings, a typo refused, and ranks that keep a different count disagree" {
+    const Reader = struct {
+        fn on(key: [:0]const u8) ?[]const u8 {
+            return if (std.mem.eql(u8, key, "TF_KV_SHARE")) "32" else null;
+        }
+        fn bad(key: [:0]const u8) ?[]const u8 {
+            return if (std.mem.eql(u8, key, "TF_KV_SHARE")) "on" else null;
         }
     };
     var problem: []const u8 = "";
     const s = try Settings.read(Reader.on, &problem);
-    try std.testing.expect(s.l2pf.on);
+    try std.testing.expectEqual(@as(u32, 32), s.kv_share); // port note (af9777b49): the fork's test, its L2PF splice removed
     try std.testing.expectError(error.BadSetting, Settings.read(Reader.bad, &problem));
-    try std.testing.expectEqualStrings("TF_GLM_L2PF: 0 or 1", problem);
+    try std.testing.expect(std.mem.indexOf(u8, problem, "TF_KV_SHARE") != null);
     const h: [32]u8 = @splat(0);
     var all = [_]Fingerprint{ Fingerprint.of(2, 0, s, 8192, true, h, h, h), Fingerprint.of(2, 1, s, 8192, true, h, h, h) };
-    try std.testing.expectEqual([4]u32{ 1, 12, 2, 150 }, all[0].l2pf);
+    try std.testing.expectEqual(@as(u32, 32), all[0].kv_share);
     try std.testing.expectEqual(@as(?Mismatch, null), mismatch(&all));
-    all[1].l2pf[3] = 0; // rank 1 unpaced
-    try std.testing.expectEqual(Mismatch{ .field = .l2pf, .rank = 1 }, mismatch(&all).?);
+    all[1].kv_share = 0; // rank 1 without the variable
+    try std.testing.expectEqual(Mismatch{ .field = .kv_share, .rank = 1 }, mismatch(&all).?);
 }
+
