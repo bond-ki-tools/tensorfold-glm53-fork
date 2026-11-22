@@ -368,7 +368,7 @@ pub fn follow(e: *Engine, link: *Link) !void {
         e.structured = structuredStep(h); // rank 0 alone masks them
         switch (kind) {
             .begin => {
-                if (step.ids.len > 0) try (e.pages orelse return error.BadStep).map(h.slot, step.ids, std.math.cast(usize, h.a) orelse return error.BadStep);
+                if (step.ids.len > 0) try (e.pages orelse return error.BadStep).mapWith(h.slot, step.ids, h.depth, std.math.cast(usize, h.a) orelse return error.BadStep); // port note (af9777b49): gate 5b — the twin ids ride the begin step under the shard
                 try e.beginFollowing(if (h.flags & 1 != 0) .{ .seed = h.seed, .temperature = h.temperature, .top_p = h.top_p, .min_p = h.min_p, .top_k = h.top_k } else null);
             },
             .pool => {

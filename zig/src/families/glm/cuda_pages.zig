@@ -290,8 +290,24 @@ pub const Pages = struct {
         return l.ids.items;
     }
 
-    /// Another rank: paged slot `slot` maps rank 0's page ids (its begin step's), the prompt cache's `kept` first.
+    /// Another rank: paged slot `slot` maps rank 0's page ids (sent with the stream's begin step).
     pub fn map(p: *Pages, slot: u32, ids: []const u32, kept: usize) !void {
+        return p.mapWith(slot, ids, 0, kept);
+    }
+
+    /// `map` of a begin step whose last `twin` ids are a sharded stream's twin (cuda_follow: the header's depth), the
+    /// shared store's `kept` first (its rows stay; TF_KV_POISON leaves them alone). Port note (af9777b49): gate 5b.
+    pub fn mapWith(p: *Pages, slot: u32, all: []const u32, twin: usize, kept: usize) !void {
+        if (p.shard) |x| {
+            if (!p.paged(slot) or twin > all.len or p.used[slot]) return error.BadStep;
+            const ids = all[0 .. all.len - twin];
+            if (ids.len == 0 or ids.len > tableLen(p.e.capacity)) return error.BadStep;
+            try x.parts.map(slot, ids, all[ids.len..]);
+            errdefer x.parts.close(slot);
+            return p.mappedShard(slot, true);
+        }
+        if (twin != 0) return error.BadStep;
+        const ids = all;
         if (!p.paged(slot) or ids.len == 0 or ids.len > tableLen(p.e.capacity) or kept > ids.len) return error.BadStep;
         if (p.used[slot]) return error.BadStep;
         for (ids) |id| if (id >= p.pool.total()) return error.BadStep;
