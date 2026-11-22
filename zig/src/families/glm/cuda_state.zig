@@ -56,7 +56,7 @@ fn arena(d: *const cuda.Driver, sizes: []const usize, out: []u64) !Arena {
 pub const page_rows = latent.chunk;
 
 /// Where a paged sequence's caches are: the pool's pages at `kv`, `page_bytes` apart, through a table of `pages`.
-pub const Paged = struct { kv: u64, pages: usize, page_bytes: u64, pk: u64 = 0, pk_page: u64 = 0 }; // pk: TF_GLM_KV_HOST
+pub const Paged = struct { kv: u64, pages: usize, page_bytes: u64, pk: u64 = 0, pk_page: u64 = 0, lat: u64 = 0, lat_page: u64 = 0, shard: bool = false }; // port note (af9777b49): lat/shard — the fork's KV_SHARD tables beside pk (their host pages)
 
 /// The DSA (MLA) layers among the loaded ones; the MTP layer's caches come after theirs.
 pub fn mlaLayers(w: *const weights.Weights) usize {

@@ -8,6 +8,7 @@ const state = @import("cuda_state.zig");
 const types = @import("cuda_engine_types.zig");
 const Engine = @import("cuda_engine.zig").Engine;
 const kv_host = @import("cuda_kv_host.zig");
+const kvs = @import("cuda_kv_shard.zig"); // port note (af9777b49): gate 3 — the fork's pool parts
 
 /// Table entries a sequence of `capacity` rows takes.
 pub fn tableLen(capacity: usize) usize {
@@ -44,10 +45,16 @@ pub fn ownSequence(e: *Engine) !void {
     if (e.seqs.items[0] != null) return error.SlotTaken;
     const q = try e.gpa.create(types.Seq);
     errdefer e.gpa.destroy(q);
-    q.* = .{ .st = try fw.State.initPaged(e.gpa, e.d, &e.w, e.capacity, on(e, 0, state.pageBytes(&e.w))) };
+    q.* = .{ .st = try fw.State.initPaged(e.gpa, e.d, &e.w, e.capacity, if (e.settings.kv_shard.on) onShard2(e) else on(e, 0, state.pageBytes(&e.w))) }; // port note (af9777b49): gate 3 — the shard's own tables when on
     e.seqs.items[0] = q;
     e.cur = q;
     e.slot = 0;
+}
+
+/// The shard's own tables as the engine's own sequence's place (its arenas exist from the pool's init).
+fn onShard2(e: *const Engine) state.Paged {
+    const g = kvs.Geometry.of(&e.w.config, state.mlaLayers(&e.w)); // slot 0's tables fill at the pool's own placement
+    return .{ .kv = 0, .pages = tableLen(e.capacity), .page_bytes = g.keyPage(), .lat = 0, .lat_page = g.latPage(), .shard = true };
 }
 
 /// A sequence's place on the pages at `kv`: a table as long as a stream's window.
@@ -71,6 +78,60 @@ pub const Pages = struct {
     leader: bool,
     poison: bool, // TF_KV_POISON=1: a stream's pages start as NaN, so a row read before its write shows in the reply
     prompts: ?kp.Prompts = null, // TF_KV_SHARE: the shared prompt store over this pool (rank 0's), from the server
+    shard: ?*Shard = null, // port note (af9777b49): gate 3 — TF_GLM_KV_SHARD: the pool's two parts (then `pool` holds no page)
+
+    /// A sharded pool's own parts on a rank (TF_GLM_KV_SHARD): the two parts' leases (rank 0's) or mapped ids, every
+    /// page's keys, this rank's latent pages and its trash page, each slot's latent pages, a begin's ids as they cross.
+    pub const Shard = struct {
+        parts: kvs.Parts,
+        g: kvs.Geometry,
+        rank: usize,
+        switches: kvs.Switches,
+        keys: ?cuda.DeviceBuffer = null,
+        lat: ?cuda.DeviceBuffer = null,
+        lids: []std.ArrayList(u32),
+        wire: std.ArrayList(u32) = .empty,
+        rounds: u64 = 0, // rank 0: decode rounds, for TF_GLM_KV_SHARD_CHECK's digest
+    };
+
+    /// The sharded page's parts for engine `e`: its DSA layers' latent rows and pooled keys (the MTP head is refused).
+    fn geometry(e: *const Engine) kvs.Geometry {
+        return kvs.Geometry.of(&e.w.config, state.mlaLayers(&e.w));
+    }
+
+    /// The shard's own tables as a paged state's place.
+    fn onShard(e: *const Engine, keys: u64, lat: u64) state.Paged {
+        const g = geometry(e);
+        return .{ .kv = keys, .pages = tableLen(e.capacity), .page_bytes = g.keyPage(), .lat = lat, .lat_page = g.latPage(), .shard = true };
+    }
+
+    /// Sharded: the parts on `pages` pages (a part each half of them less the trash page's room), their arenas.
+    fn initShard(gpa: std.mem.Allocator, e: *Engine, streams: usize, pages: usize, leader: bool) !*Shard {
+        const g = geometry(e);
+        const h = kvs.Geometry.half(pages);
+        if (h == 0) return error.PoolTooSmall;
+        const x = try gpa.create(Shard);
+        errdefer gpa.destroy(x);
+        x.* = .{ .parts = try kvs.Parts.init(gpa, h, g.keyPage(), streams, leader), .g = g, .rank = e.share.rank, .switches = e.settings.kv_shard, .lids = &.{} };
+        errdefer x.parts.deinit();
+        x.lids = try gpa.alloc(std.ArrayList(u32), streams);
+        @memset(x.lids, .empty);
+        errdefer gpa.free(x.lids);
+        x.keys = try cuda.DeviceBuffer.alloc(e.d, 2 * h * g.keyPage());
+        errdefer x.keys.?.free();
+        x.lat = try cuda.DeviceBuffer.alloc(e.d, (h + 1) * g.latPage()); // the trash page last
+        return x;
+    }
+
+    fn freeShard(gpa: std.mem.Allocator, x: *Shard) void {
+        if (x.lat) |*b| b.free();
+        if (x.keys) |*b| b.free();
+        for (x.lids) |*l| l.deinit(gpa);
+        gpa.free(x.lids);
+        x.wire.deinit(gpa);
+        x.parts.deinit();
+        gpa.destroy(x);
+    }
 
     /// `streams` sequences from slot 0 on `pages` pages: the engine's own (`ownSequence`) placed, the others made now.
     pub fn init(gpa: std.mem.Allocator, e: *Engine, l: kv.Layout, streams: usize, pages: usize, leader: bool) !*Pages {
@@ -78,12 +139,15 @@ pub const Pages = struct {
         if (own == null or own.?.st.table == 0) return error.OwnNotPaged; // slot 0 holds a window, or none was made
         const p = try gpa.create(Pages);
         errdefer gpa.destroy(p);
-        const page = if (kv_host.onHost()) state.pageBytes(&e.w) else l.pageBytes();
-        p.* = .{ .gpa = gpa, .e = e, .layout = l, .page = page, .pool = try kv.Pool.init(gpa, pages, page), .arena = null, .leases = &.{}, .used = &.{}, .leader = leader, .poison = poisoned() };
+        const sharded = e.settings.kv_shard.on; // port note (af9777b49): gate 3 — the fork's shard beside the host pages
+        const page = if (kv_host.onHost() and !sharded) state.pkPageBytes(&e.w) else l.pageBytes();
+        p.* = .{ .gpa = gpa, .e = e, .layout = l, .page = page, .pool = try kv.Pool.init(gpa, if (sharded) 0 else pages, page), .arena = null, .leases = &.{}, .used = &.{}, .leader = leader, .poison = poisoned() };
         errdefer p.pool.deinit();
-        const host = kv_host.onHost() and pages > 0;
-        if (pages > 0 and !host) p.arena = try cuda.DeviceBuffer.alloc(e.d, pages * page);
+        const host = kv_host.onHost() and pages > 0 and !sharded;
+        if (pages > 0 and !host and !sharded) p.arena = try cuda.DeviceBuffer.alloc(e.d, pages * page);
         errdefer if (p.arena) |*a| a.free();
+        if (sharded) p.shard = try initShard(gpa, e, streams, pages, leader); // port note (af9777b49): gate 3
+        errdefer if (p.shard) |x| freeShard(gpa, x);
         if (host) {
             if (kv_host.shared()) {
                 p.shared = try kv_host.SharedPages.open(e.d, pages * page, leader, e.share.world);
@@ -114,7 +178,7 @@ pub const Pages = struct {
             q.* = null;
         };
         errdefer cuda.completion.drain(e.d, e.stream, "GLM page construction did not drain");
-        var at = on(e, p.base(), page);
+        var at = if (p.shard) |x| onShard(e, x.keys.?.ptr, x.lat.?.ptr) else on(e, p.base(), page); // port note (af9777b49): gate 3 — the shard's own tables beside the pk arena
         if (p.pk_arena) |a| {
             at.pk = a.ptr;
             at.pk_page = state.pkPageBytes(&e.w);
@@ -155,6 +219,7 @@ pub const Pages = struct {
     /// The pool and the pages' arena; the paged sequences are the engine's (it frees every slot).
     pub fn deinit(p: *Pages) void {
         cuda.completion.drain(p.e.d, p.e.stream, "GLM page ownership did not drain");
+        if (p.shard) |x| freeShard(p.gpa, x); // port note (af9777b49): gate 3
         for (p.leases, p.used) |*l, u| {
             if (p.leader and u) p.pool.finish(l) else l.ids.deinit(p.gpa);
         }
