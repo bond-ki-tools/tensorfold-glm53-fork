@@ -85,7 +85,17 @@ pub fn pageBytes(w: *const weights.Weights) u64 {
 }
 
 /// Cache `j`'s rows on pages: its part of page 0 at `p.kv`, the others through the table.
-fn onPages(x: *dsa_block.Caches, c: anytype, p: Paged, table: u64, j: usize) void {
+fn onPages(x: *dsa_block.Caches, c: anytype, p: Paged, table: u64, ltable: u64, j: usize) void {
+    if (p.shard) { // port note (af9777b49): gate 5d — the fork's sharded layout: the latent rows on their own pages
+        x.lc = p.lat + j * page_rows * (c.kv_lora + 4);
+        x.ls = x.lc + page_rows * c.kv_lora;
+        x.pk = p.kv + j * (page_rows / sparse.pool * c.i_dim * 2);
+        x.pt = table;
+        x.ps = p.page_bytes;
+        x.lpt = ltable;
+        x.lps = p.lat_page;
+        return;
+    }
     x.lc = p.kv + j * pageCacheBytes(c);
     x.pk = if (p.pk != 0) p.pk + j * pkCacheBytes(c) else x.lc + page_rows * c.kv_lora * 2;
     x.pks = p.pk_page;
@@ -458,8 +468,8 @@ pub const State = struct {
 
     /// A paged sequence's caches on the pages of `p` (the engine's own, made before its pool, placed when it is made).
     pub fn place(st: *State, w: *const weights.Weights, p: Paged) void {
-        for (st.caches, 0..) |*x, j| onPages(x, &w.config, p, st.table, j);
-        onPages(&st.mtp_caches, &w.config, p, st.table, st.caches.len);
+        for (st.caches, 0..) |*x, j| onPages(x, &w.config, p, st.table, st.ltable, j);
+        onPages(&st.mtp_caches, &w.config, p, st.table, st.ltable, st.caches.len);
     }
 
     pub fn deinit(st: *State) void {

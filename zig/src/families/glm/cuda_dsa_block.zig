@@ -47,6 +47,18 @@ pub const Caches = struct {
     pt: u64 = 0, // on pages: the stream's table (i32 page ids), lc and pk then this cache's place in page 0; 0: rows
     ps: u64 = 0, // on pages: bytes from one page to the next
     pks: u64 = 0, // TF_GLM_KV_HOST: the pooled keys' own page stride (their pages on the device); 0: ps
+
+    lpt: u64 = 0, // port note (af9777b49): gate 5d — sharded (TF_GLM_KV_SHARD): the latent rows' own table and stride (lc, ls); 0: pt and ps
+    lps: u64 = 0,
+
+    /// The latent rows' table and page stride: pt and ps, or sharded the latent pages' own.
+    pub fn latPt(c: Caches) u64 {
+        return if (c.lpt != 0) c.lpt else c.pt;
+    }
+
+    pub fn latPs(c: Caches) u64 {
+        return if (c.lpt != 0) c.lps else c.ps;
+    }
 };
 
 /// The block's scratch for up to `rows` rows.
