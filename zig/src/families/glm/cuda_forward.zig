@@ -13,6 +13,7 @@ const sparse = @import("cuda_sparse.zig");
 const experts = @import("cuda_experts.zig");
 const kda_block = @import("cuda_kda_block.zig");
 const dsa_block = @import("cuda_dsa_block.zig");
+const kv_attn = @import("cuda_kv_shard_attn.zig"); // port note (af9777b49): gate 4 — the owner-computed attention
 const mlp = @import("cuda_mlp.zig");
 const moe = @import("cuda_moe.zig");
 const quant = @import("cuda_quant.zig");
@@ -149,6 +150,7 @@ pub const Forward = struct {
     stream: cuda.Stream,
     ranks: []const Rank, // every rank of a local check, or this process's one
     exchange: Exchange,
+    kv: ?*const kv_attn.Ctx = null, // port note (af9777b49): gate 4 — TF_GLM_KV_SHARD: owner-computed attention's exchange room (null: unsharded)
     kda_wide: bool = true, // TF_GLM_KDA_DECODE_WIDE (the Python family's default): decode windows on KDA's three-kernel chain
     pieces: ?*const Pieces = null, // a prompt chunk's exchanges in row pieces on a second stream (null: whole)
     split: bool = true, // TF_GLM_PREFILL_REDUCE=split (the default with send/recv): each rank glues its own rows
@@ -217,7 +219,8 @@ pub const Forward = struct {
                 if (b.prefill) st.cur[li] = 1 - cur; // a prompt chunk keeps every row: the layer commits now
             },
             .mla => |a| {
-                try dsa_block.body(.{ .set = f.set(), .ops = f.m.ops(), .prof = f.prof, .split = f.indexSplit(r) }, f.stream, a, st.caches[di], b.dsa, b.normed, c.hidden, rows, st.pos_dev, st.pos, nch, b.part_rows);
+                const k: dsa_block.Kernels = .{ .set = f.set(), .ops = f.m.ops(), .prof = f.prof, .split = f.indexSplit(r) };
+                if (kv_attn.wanted(f, r)) try kv_attn.single(f, r, a, di, rows, nch, k) else try dsa_block.body(k, f.stream, a, st.caches[di], b.dsa, b.normed, c.hidden, rows, st.pos_dev, st.pos, nch, b.part_rows); // port note (af9777b49): gate 4 — the shard's owner-computed path
                 if (out) |o| try dsa_block.fill(f.set(), f.stream, a, b.dsa, 0, rows, o);
             },
         }
