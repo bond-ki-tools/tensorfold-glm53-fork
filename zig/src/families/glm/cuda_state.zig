@@ -504,13 +504,19 @@ pub const State = struct {
 
     /// Before a pass of `rows` rows at pos: within capacity, and the index rings holding them (rebased if not).
     pub fn ready(st: *State, stream: cuda.Stream, rows: usize) !void {
-        if (st.pos + rows > st.capacity) return error.PastCapacity;
+        if (st.pos + rows > st.capacity) {
+            std.log.err("PastCapacity at ready: pos {d} + rows {d} > capacity {d} (pages {d}, ring_rows {d})", .{ st.pos, rows, st.capacity, st.pages.len, st.ring_rows }); // port note (af9777b49): 0093 debug — the 2026-11-20 wall
+            return error.PastCapacity;
+        }
         if (st.pos + rows > st.base + st.ring_rows) try st.rebase(stream, false);
     }
 
     /// Before the MTP head's pass of `n` rows at mtp_len, likewise for its caches.
     pub fn readyMtp(st: *State, stream: cuda.Stream, n: usize) !void {
-        if (st.mtp_len + n > st.capacity) return error.PastCapacity;
+        if (st.mtp_len + n > st.capacity) {
+            std.log.err("PastCapacity at readyMtp: mtp_len {d} + n {d} > capacity {d} (pages {d})", .{ st.mtp_len, n, st.capacity, st.pages.len }); // port note (af9777b49): 0093 debug
+            return error.PastCapacity;
+        }
         if (st.mtp_len + n > st.mtp_base + st.ring_rows) try st.rebase(stream, true);
     }
 
