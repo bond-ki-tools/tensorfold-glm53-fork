@@ -48,7 +48,7 @@ pub fn Walk(comptime Live: type, comptime at: fn (Live, usize) Live) type {
 
         /// Each part in order against kept bytes from 0: f(ctx, live, kept, n), split where a live or kept page ends.
         pub fn each(
-            parts: []const Part,
+            parts: anytype, // port note (af9777b49): gate 5d — a family's own Part walks here too (the layout's lat parts)
             ids: []const u32,
             kept: Kept,
             ctx: anytype,
