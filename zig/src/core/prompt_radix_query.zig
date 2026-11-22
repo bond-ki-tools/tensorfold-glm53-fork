@@ -12,10 +12,15 @@ pub fn Schedule(comptime Query: type) type {
         }
 
         /// The chunk start at or before `w`: a planned store's request starts if given, else its grid; unplanned, `w`.
+        /// port note (af9777b49): the fork's sub-grid mark — below the first grid edge the page edge serves
+        /// (the page_only store always resumed at page edges; a sub-grid prompt keeps its pages from the
+        /// edge under its end instead of never keeping, so short conversations cache their turns too).
         pub fn startAt(r: Rules, q: Query, w: u32) u32 {
             if (!r.planned) return w;
             if (q.starts.len > 0) return cuts.floorStart(q.starts, w);
-            return w - w % r.grid;
+            const grid_start = w - w % r.grid;
+            if (grid_start == 0 and w >= r.page and r.page > 0) return w - w % r.page;
+            return grid_start;
         }
 
         /// Whether a pass may cut and resume at `at`: a page edge on the request's chunk schedule.
@@ -57,6 +62,11 @@ test "a planned store cuts on its grid, or on a request's own starts in place of
     const pages: Rules = .{ .page = 4 };
     try testing.expectEqual(@as(?u32, 20), S.markAt(pages, own, 23)); // unplanned: starts do not bind
     try testing.expectEqual(@as(?u32, null), S.markAt(pages, none, 3));
+    // port note (af9777b49): below the first grid edge the page edge under w serves (a short prompt keeps its turns).
+    try testing.expectEqual(@as(?u32, 4), S.markAt(grid, none, 5)); // sub-grid w floors to its page edge
+    try testing.expect(S.usable(grid, none, 4) and !S.usable(grid, none, 2)); // the edge serves; under a page serves none
+    try testing.expectEqual(@as(?u32, null), S.markAt(grid, none, 3)); // under a page: no mark
+    try testing.expectEqual(@as(?u32, 16), S.markAt(grid, none, 17)); // above the grid: unchanged
 }
 
 test "a key of another length than the prompt is not keyed" {
