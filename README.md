@@ -1,3 +1,16 @@
+
+## About this fork
+
+This is the lewald fork of TensorFold: TensorFold 1.3.2 (`b472b9f84`) plus 26 patches that
+bring full GLM-5.3-Flash parity on NVIDIA GB10 — KV sharding across ranks, conversation
+learning to the disk tier, the grant-slack fix, sub-grid prompt-cache marks, and an opt-in
+tool-call guard (`TF_TOOL_CALL_GUARD=1`). Every change is committed with its author and
+provenance; the served build is proven against the full battery. See
+[docs/fork-provenance.md](docs/fork-provenance.md). Upstream remains
+[ashhart/TensorFold](https://github.com/ashhart/TensorFold) (Apache 2.0); carried pull
+requests keep their authors. The recipe that builds and serves this fork lives at
+`lewald/glm53-tensorfold-jl`.
+
 <p align="center">
   <a href="https://ko-fi.com/ashxhart">Help Support TensorFold</a> ·
   <a href="https://x.com/tensorfold_dev">@tensorfold_dev on X</a>
