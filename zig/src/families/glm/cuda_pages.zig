@@ -397,13 +397,14 @@ pub const Pages = struct {
     const Upload = struct {
         p: *Pages,
         slot: u32,
+        latent: bool = false, // port note (af9777b49): gate 5a — the shard's latent table uploads beside the key table
 
         fn write(ctx: *anyopaque, ids: []const u32, from: usize) anyerror!void {
             const u: *Upload = @ptrCast(@alignCast(ctx));
             const e = u.p.e;
             const st = &e.seqs.items[u.slot].?.st;
             const bytes = std.mem.sliceAsBytes(ids[from..]);
-            try e.d.check(e.d.api.cuMemcpyHtoD_v2(st.table + from * 4, bytes.ptr, bytes.len), "cuMemcpyHtoD");
+            try e.d.check(e.d.api.cuMemcpyHtoD_v2((if (u.latent) st.ltable else st.table) + from * 4, bytes.ptr, bytes.len), "cuMemcpyHtoD");
         }
     };
 };
