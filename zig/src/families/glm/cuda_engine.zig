@@ -158,6 +158,8 @@ pub const Engine = struct {
         backend.* = .{ .d = d, .lib = lib, .comm = comm, .rank = tg.rank, .world = tg.world, .owner = o.owner };
         const kb = @import("cuda_kda_block.zig");
         kb.pad_to = if (o.settings.kda_pad) kb.padWidth(c.kda_heads, world) else 0; // read once: rowWidth reads only this
+        // TF_GLM_KV_SHARD's refusals, alike on every rank from the agreed fingerprint, before anything loads (port note (af9777b49): gate 5c)
+        try kv_shard.refuse(o.settings.kv_shard, .{ .world = world, .kv8 = o.settings.kv8, .pages = o.settings.pages, .mtp_drafts = o.mtp and o.drafter == null });
         const spans = try gpa.alloc(shard.Span, world);
         errdefer gpa.free(spans);
         for (spans, 0..) |*sp, q| sp.* = (try shard.Share.of(&c, q, world)).vocab;
@@ -493,6 +495,7 @@ pub const Engine = struct {
     /// A verify window: `ids` (pending token, then drafts) at the committed position; `out[r]` drawn at pos + 1 + r.
     pub fn verify(e: *Engine, ids: []const u32, out: []u32, bits: u64) !void {
         if (ids.len == 0 or ids.len > fw.window_rows) return error.WindowTooWide;
+        try e.giveTwin(e.slot); // port note (af9777b49): gate 5c — the twin goes back before the first decode round
         var one: [1]fw.Rank = undefined;
         var f = e.view(&e.bd, &one);
         const at = e.cur.st.pos;
@@ -518,6 +521,7 @@ pub const Engine = struct {
             if (p.ids.len == 0 or p.ids.len > fw.window_rows or rows + p.ids.len > shared_rows) return error.WindowTooWide;
             for (parts[0..i]) |q| if (q.slot == p.slot) return error.SlotTwice;
             try e.bind(p.slot);
+            try e.giveTwin(p.slot); // port note (af9777b49): gate 5c — each shared part's twin before its draws
             segs[i] = .{ .st = &e.cur.st, .row0 = rows, .rows = p.ids.len };
             @memcpy(ids[rows..][0..p.ids.len], p.ids);
             rows += p.ids.len;
