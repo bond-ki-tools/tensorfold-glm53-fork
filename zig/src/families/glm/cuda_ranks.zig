@@ -4,6 +4,7 @@ const std = @import("std");
 const cuda = @import("cuda");
 const heat = @import("heat");
 const l2pf = @import("cuda_l2pf.zig");
+const kv_shard = @import("cuda_kv_shard.zig"); // port note (af9777b49): the fork's KV sharding, grafted at 1.3.2
 const Sha256 = std.crypto.hash.sha2.Sha256;
 
 /// The forward's knobs a rank reads from its environment (the Python family's names and defaults).
@@ -28,6 +29,7 @@ pub const Settings = struct {
     roce_wide: bool = false, // TF_ROCE=1: at three ranks or more the RoCE gather and the drafter MLP split (two ranks: always)
     kv_host: u8 = 0, // TF_GLM_KV_HOST=1: KV pages in host memory (1); with TF_GLM_KV_HOST_SHARED=1, one copy a host (2)
     kv_host_gib: f64 = 0, // TF_GLM_KV_HOST_GIB: the host pages' GiB (0: one full window)
+    kv_shard: kv_shard.Switches = .{}, // TF_GLM_KV_SHARD and its knobs: each stream's latent rows on one rank
     l2pf: l2pf.Options = .{}, // TF_GLM_L2PF and its knobs: a decode window's next weights read into L2 beside it
     kv_live_half: bool = false, // TF_GLM_KV_LIVE_HALF=1: a keep carries the live KDA half alone (cuda_snapshot_layout.zig)
 
@@ -182,6 +184,10 @@ pub const Settings = struct {
             problem.* = "TF_GLM_KDA_PAD=1 requires TF_GLM_MM=1 (glm_mm is what reads the padded rows)";
             return error.BadSetting;
         }
+        s.kv_shard = kv_shard.Switches.read(get) catch |err| { // port note (af9777b49): the fork's shard switches, refused alike on every rank
+            problem.* = kv_shard.why(err).?;
+            return error.BadSetting;
+        };
         return s;
     }
 };
@@ -207,7 +213,7 @@ fn wireOpens(get: *const fn ([:0]const u8) ?[]const u8) bool {
 
 /// What every rank must agree on, as bytes the communicator carries.
 pub const Fingerprint = extern struct {
-    layout: u32 = 21, // this struct's version (20, main's kv_live_half, plus roce_wide)
+    layout: u32 = 22, // this struct's version (21, main's kv_live_half, plus roce_wide; 22 the fork's kv_shard tail)
     world: u32,
     rank: u32,
     kv8: u32 = 0,
@@ -238,6 +244,8 @@ pub const Fingerprint = extern struct {
     heat_low: f64,
     kv_host_gib: f64 = 0, // TF_GLM_KV_HOST_GIB: each rank's row marks span the host pages rank 0 counts
     config: [32]u8, // sha256 of config.json
+    kv_shard: u32 = 0, // port note (af9777b49): TF_GLM_KV_SHARD and _CARRY, _TWINS (kv_shard.Switches.word; 0: off) — the fork's tail, wire-additive
+    kv_shard_check: u32 = 0, // TF_GLM_KV_SHARD_CHECK when on (0 off)
     program: [32]u8, // sha256 of this executable
     checkpoint: [64]u8, // hex digest of the checkpoint's metadata and every shard byte, through the digest cache
 
@@ -306,6 +314,8 @@ pub const Fingerprint = extern struct {
             .roce_wide = @intFromBool(s.roce_wide and world >= 3), // two ranks ask by default, so a lone TF_ROCE=1 there is no difference
             .kv_host = s.kv_host,
             .kv_host_gib = s.kv_host_gib,
+            .kv_shard = s.kv_shard.word(), // port note (af9777b49): the fork's shard fingerprint
+            .kv_shard_check = s.kv_shard.checkWord(),
             .solo = @intFromBool(s.solo),
             .l2pf = s.l2pf.words(),
             .bits = @as(u32, s.dense_bits) << 8 | s.head_bits,
