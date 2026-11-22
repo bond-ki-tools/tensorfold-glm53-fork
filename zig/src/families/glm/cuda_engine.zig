@@ -7,6 +7,9 @@ const shard = @import("cuda_shard.zig");
 const weights = @import("cuda_weights.zig");
 const fw = @import("cuda_forward.zig");
 const ranks = @import("cuda_ranks.zig");
+const kv_shard = @import("cuda_kv_shard.zig"); // port note (af9777b49): the fork's KV sharding, grafted at 1.3.2 — gate 2
+const kv_attn = @import("cuda_kv_shard_attn.zig");
+const kv_keep = @import("cuda_kv_shard_keep.zig");
 const sampler = @import("cuda_sampler.zig");
 const prompt_lp = @import("cuda_prompt_logprobs.zig");
 const heat = @import("heat");
@@ -84,6 +87,9 @@ pub const Engine = struct {
     bs: ?fw.Buffers = null, // shared verify windows (with the MTP head, as the lane core shares only then)
     pairs: cuda.DeviceBuffer, // every rank's (value, id) of a greedy draw
     smp: sampler.Sampler,
+    kv_room: ?cuda.DeviceBuffer = null, // port note (af9777b49): the shard's exchange room (TF_GLM_KV_SHARD)
+    kv_stage: ?cuda.DeviceBuffer = null, // ...and a resume's carry pieces (cuda_kv_shard_keep.piece_bytes)
+    kv_ctx: kv_attn.Ctx = undefined, // ...their place for the forward (read only with settings.kv_shard.on)
     seqs: std.ArrayList(?*Seq) = .empty, // every stream's sequence by slot (the lane backend's), slot 0 made at init
     cur: *Seq = undefined, // the bound slot's: every step below runs on it
     slot: u32 = 0,
@@ -210,6 +216,8 @@ pub const Engine = struct {
         if (o.mtp) e.bs = try fw.Buffers.initShared(d, &e.w, shared_rows, o.capacity);
         errdefer if (e.bs) |*b| b.deinit();
         e.pairs = try cuda.DeviceBuffer.alloc(d, pair_bytes * world * pick_rows);
+        if (o.settings.kv_shard.on) try e.initKvShard(); // port note (af9777b49): before the room is read: its bytes are the rank's own — gate 2
+        errdefer e.freeKvShard();
         errdefer e.pairs.free();
         try d.check(d.api.cuMemsetD8_v2(e.pairs.ptr, 0, pair_bytes * world * pick_rows), "cuMemsetD8"); // each pair's padding stays zero
         e.smp = try sampler.Sampler.init(d, c.vocab, fw.window_rows);
@@ -248,6 +256,7 @@ pub const Engine = struct {
         e.prompt_out.free();
         e.smp.deinit();
         e.pairs.free();
+        e.freeKvShard(); // port note (af9777b49): gate 2 — the shard's rooms
         if (e.bs) |*b| b.deinit();
         e.bm.deinit();
         e.bd.deinit();
@@ -274,6 +283,36 @@ pub const Engine = struct {
         e.group = g;
         e.backend.group = g;
         std.log.info("[tensorfold] glm: rank {d} of {d} sums through the {t} collective (RoCE gathers {s})", .{ g.rank, g.world, e.collective.kind(), if (g.fast != null or g.multi != null) "on" else "off" });
+    }
+
+    /// The shard's rooms and the forward's place under TF_GLM_KV_SHARD (port note (af9777b49): gate 2, the fork's bodies against the 1.3.2 engine).
+    fn initKvShard(e: *Engine) !void {
+        const rows = @import("cuda_kv_shard_attn.zig").rowsOf(e);
+        const hl = e.share.mla.len();
+        const half = rows * hl * e.c.kv_lora * 2;
+        e.kv_room = try cuda.DeviceBuffer.alloc(e.d, kv_attn.roomBytes(rows, hl, e.c.kv_lora));
+        e.kv_stage = try cuda.DeviceBuffer.alloc(e.d, kv_keep.piece_bytes);
+        e.kv_ctx = .{ .rank = e.share.rank, .lib = e.lib, .comm = e.comm, .pq = e.kv_room.?.ptr, .po = e.kv_room.?.ptr + half, .rows = rows };
+    }
+
+    fn freeKvShard(e: *Engine) void {
+        if (!e.settings.kv_shard.on) return;
+        if (e.kv_room) |*b| b.free();
+        if (e.kv_stage) |*b| b.free();
+        e.kv_room = null;
+        e.kv_stage = null;
+    }
+
+    /// The forward's exchange room under TF_GLM_KV_SHARD (null off).
+    pub fn kvCtx(e: *Engine) ?*const kv_attn.Ctx {
+        return if (e.settings.kv_shard.on and e.kv_room != null) &e.kv_ctx else null;
+    }
+
+    /// TF_GLM_KV_SHARD: the bound stream's prompt twin goes back before its first decode round (every rank, at the
+    /// same step); no-op off or without one.
+    fn giveTwin(e: *Engine, slot: u32) !void {
+        if (!e.settings.kv_shard.on) return;
+        if (e.pages) |p| try p.giveTwin(slot);
     }
 
     pub fn exchange(e: *const Engine) fw.Exchange {
