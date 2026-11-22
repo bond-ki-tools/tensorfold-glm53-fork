@@ -27,9 +27,15 @@ pub fn shareSlot(e: *const Engine) u64 {
     return e.stateBytes(e.capacity - e.capacity % @import("cuda_native.zig").snap_grid);
 }
 
-/// A request's need: its prompt, its reply and one last verify window.
+/// A request's need: its prompt, its reply, one last verify window, and the pass structure's overshoot — a prompt
+/// cut at the page edges (the sub-grid marks) walks in steps up to a full busy/solo chunk, and the step's ready
+/// check (`st.pos + rows > st.capacity`) fires with the step's whole span even when fewer rows remain: without the
+/// slack a 707-token request granted 2 pages died at pos 512 + a 1024-row step (the PastCapacity wall of
+/// 2026-11-20; variable-length traffic fell in it, the fixed-overhead bench prompts landed exactly on the grant
+/// edge and passed). One max step (2048 rows) of slack covers every chunked pass; ~4 pages a request.
 pub fn need(l: kv.Layout, prompt: usize, max_tokens: usize) usize {
-    return l.need(prompt, max_tokens, fw.window_rows);
+    const step_slack: usize = 2048; // the largest prompt step (solo's 2048; busy's 1024 is covered with room)
+    return l.need(prompt, max_tokens, fw.window_rows + step_slack);
 }
 
 /// The engine's own sequence (slot 0) when it pages, bound: its fixed part and table, no rows until its pool places it.
