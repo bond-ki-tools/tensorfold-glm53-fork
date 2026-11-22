@@ -79,13 +79,23 @@ pub const Pool = struct {
         p.pages.finish(lease);
     }
 
-    /// The plan's parts to (`into`) or from the lease's pages, queued on `stream`: the core walk, a copy a piece.
+    /// The plan's parts to (`into`) or from the lease's pages, queued on `stream`: a copy a piece, the layout's
+    /// own piece walking each part (the sharded lat parts by the latent ids). Port note (af9777b49): gate 5d.
     pub fn move(p: *const Pool, stream: cuda.Stream, lease: *const Lease, plan: *const Plan, into: bool) !void {
         if (plan.len > lease.ids.items.len * page) return error.SnapshotSize;
         const arena = p.arena orelse return error.NoSnapshotRoom;
-        const kept: walk.Kept = .{ .ids = lease.ids.items, .base = arena.ptr() };
+        const base = arena.ptr();
         const c: Copy = .{ .d = arena.driver(), .s = stream, .into = into };
-        try walk.Device.each(plan.parts[0..plan.count], plan.ids, kept, c, Copy.run);
+        var off: usize = 0;
+        for (plan.parts[0..plan.count]) |part| {
+            var done: usize = 0;
+            while (done < part.len) {
+                const live = plan.piece(part, done);
+                try c.run(live.live, base + off + done, live.len);
+                done += live.len;
+            }
+            off += part.len;
+        }
     }
 };
 
