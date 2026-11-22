@@ -1,10 +1,11 @@
 
 ## About this fork
 
-This is the lewald fork of TensorFold: TensorFold 1.3.2 (`b472b9f84`) plus 26 patches that
+This is the lewald fork of TensorFold: TensorFold 1.3.2 (`b472b9f84`) plus 27 patches that
 bring full GLM-5.3-Flash parity on NVIDIA GB10 — KV sharding across ranks, conversation
-learning to the disk tier, the grant-slack fix, sub-grid prompt-cache marks, and an opt-in
-tool-call guard (`TF_TOOL_CALL_GUARD=1`). Every change is committed with its author and
+learning to the disk tier, the grant-slack fix, sub-grid prompt-cache marks, an opt-in
+tool-call guard (`TF_TOOL_CALL_GUARD=1`), and the dflash selector's no-winner guard. Every
+change is committed with its author and
 provenance; the served build is proven against the full battery. See
 [docs/fork-provenance.md](docs/fork-provenance.md). Upstream remains
 [ashhart/TensorFold](https://github.com/ashhart/TensorFold) (Apache 2.0); carried pull
