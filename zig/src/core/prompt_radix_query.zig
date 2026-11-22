@@ -15,11 +15,15 @@ pub fn Schedule(comptime Query: type) type {
         /// port note (af9777b49): the fork's sub-grid mark — below the first grid edge the page edge serves
         /// (the page_only store always resumed at page edges; a sub-grid prompt keeps its pages from the
         /// edge under its end instead of never keeping, so short conversations cache their turns too).
+        /// The page edge serves only a prompt the pass carries on its own cuts (one pass's rows, 0087's
+        /// short-prompt gate): a longer prompt's passes cut on the grid alone and cannot resume there —
+        /// without this gate the store kept and adopted page-edge states that a grown turn (past the first
+        /// grid edge) resumed into BadResume, which stopped both ranks (the crash of the 2026-11-20 bench).
         pub fn startAt(r: Rules, q: Query, w: u32) u32 {
             if (!r.planned) return w;
             if (q.starts.len > 0) return cuts.floorStart(q.starts, w);
             const grid_start = w - w % r.grid;
-            if (grid_start == 0 and w >= r.page and r.page > 0) return w - w % r.page;
+            if (grid_start == 0 and w >= r.page and r.page > 0 and q.prompt_len <= r.grid + 1) return w - w % r.page;
             return grid_start;
         }
 
@@ -67,6 +71,12 @@ test "a planned store cuts on its grid, or on a request's own starts in place of
     try testing.expect(S.usable(grid, none, 4) and !S.usable(grid, none, 2)); // the edge serves; under a page serves none
     try testing.expectEqual(@as(?u32, null), S.markAt(grid, none, 3)); // under a page: no mark
     try testing.expectEqual(@as(?u32, 16), S.markAt(grid, none, 17)); // above the grid: unchanged
+    // port note (af9777b49, the bench crash fix): a prompt grown past the grid edge takes no page edge —
+    // its passes cut on the grid alone, so the store must neither mark nor resume there (BadResume).
+    const grown: Q = .{ .key = &.{}, .prompt_len = 30 };
+    try testing.expectEqual(@as(?u32, null), S.markAt(grid, grown, 5)); // grown: no sub-grid mark
+    try testing.expect(!S.usable(grid, grown, 4)); // and no sub-grid resume
+    try testing.expect(S.usable(grid, grown, 16) and !S.usable(grid, grown, 12)); // the grid still serves it
 }
 
 test "a key of another length than the prompt is not keyed" {
