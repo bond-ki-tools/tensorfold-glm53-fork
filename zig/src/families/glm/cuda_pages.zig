@@ -259,6 +259,21 @@ pub const Pages = struct {
         var held = adopted.len > 0;
         errdefer if (held) for (adopted) |id| p.pool.release(id);
         if (!p.paged(slot) or p.used[slot]) return error.SlotTaken;
+        if (p.shard) |x| { // port note (af9777b49): gate 5 — the fork's parts-open (TF_GLM_KV_SHARD)
+            const n = need(p.layout, prompt, max_tokens);
+            if (n > tableLen(p.e.capacity)) return error.PromptTooLong;
+            if (n > x.parts.h) return error.PoolTooSmall; // a stream's pages lie in one part
+            if (adopted.len > n) return error.PromptTooLong;
+            const part: u8 = if (adopted.len > 0) @intCast(kvs.partOf(adopted[0], x.parts.h)) else (x.parts.choose(n, null) orelse return error.LaneMemory);
+            try x.parts.open(slot, part, n, if (adopted.len == 0 and x.switches.twins) p.layout.pages(prompt) else 0, adopted);
+            errdefer x.parts.close(slot);
+            try p.mappedShard(slot, true);
+            const sl = &x.parts.slots[slot];
+            x.wire.clearRetainingCapacity();
+            try x.wire.appendSlice(p.gpa, sl.ids.items);
+            try x.wire.appendSlice(p.gpa, sl.twin.items);
+            return x.wire.items;
+        }
         const n = need(p.layout, prompt, max_tokens);
         if (n > tableLen(p.e.capacity) or adopted.len > n) return error.PromptTooLong;
         const l = &p.leases[slot];
@@ -301,12 +316,68 @@ pub const Pages = struct {
     }
 
     /// The stream on paged slot `slot` ended: its sequence reaches no rows, and rank 0's lease gives its pages back.
+    /// The ids a sharded begin step carries after the stream's own: its twin's (0 unsharded or without one). Port note (af9777b49): gate 5.
+    pub fn twinCount(p: *const Pages, slot: u32) usize {
+        const x = p.shard orelse return 0;
+        if (!p.paged(slot)) return 0;
+        return x.parts.slots[slot].twin.items.len;
+    }
+
+    /// Every rank, where a prompt pass ends (its last chunk committed): slot `slot`'s twin goes back, and this rank's
+    /// latent table points at its own pages or the trash page again. No-op unsharded or without a twin.
+    pub fn giveTwin(p: *Pages, slot: u32) !void {
+        const x = p.shard orelse return;
+        if (!p.paged(slot) or !p.used[slot]) return;
+        if (!x.parts.giveBack(slot)) return;
+        try p.mappedShard(slot, false); // its rows stay: no TF_KV_POISON fill
+    }
+
+    /// Sharded: every live stream's place hashed (rank 0's sent every TF_GLM_KV_SHARD_CHECK rounds; 0 unsharded).
+    pub fn digest(p: *const Pages) u64 {
+        const x = p.shard orelse return 0;
+        return x.parts.digest();
+    }
+
+    /// Sharded: slot `slot`'s pages mapped on this rank: its table (key pages) and its latent table (this rank's own
+    /// pages, a twin's, or the trash page), uploaded, and who holds its latent rows; `fresh` (a new stream): the
+    /// pages NaN-filled first under TF_KV_POISON. Port note (af9777b49): gate 5.
+    fn mappedShard(p: *Pages, slot: u32, fresh: bool) !void {
+        const x = p.shard.?;
+        const sl = &x.parts.slots[slot];
+        const ids = sl.ids.items;
+        const lids = &x.lids[slot];
+        lids.clearRetainingCapacity();
+        try lids.resize(p.gpa, ids.len);
+        kvs.latentIds(x.rank, x.parts.h, ids, sl.twin.items, lids.items);
+        const st = &p.e.seqs.items[slot].?.st;
+        var up: Upload = .{ .p = p, .slot = slot };
+        try Upload.write(&up, ids, 0);
+        var lup: Upload = .{ .p = p, .slot = slot, .latent = true };
+        try Upload.write(&lup, lids.items, 0);
+        if (p.poison and fresh) for (ids, lids.items) |id, lid| {
+            try p.e.d.check(p.e.d.api.cuMemsetD32Async(x.keys.?.ptr + id * x.g.keyPage(), 0xFFFF_FFFF, x.g.keyPage() / 4, p.e.stream.handle), "cuMemsetD32Async");
+            if (lid != x.parts.h) try p.e.d.check(p.e.d.api.cuMemsetD32Async(x.lat.?.ptr + lid * x.g.latPage(), 0xFFFF_FFFF, x.g.latPage() / 4, p.e.stream.handle), "cuMemsetD32Async");
+        };
+        st.pages = ids;
+        st.lpages = lids.items;
+        st.hold = sl.hold();
+        st.capacity = @min(ids.len * state.page_rows, p.e.capacity);
+        p.used[slot] = true;
+    }
+
     pub fn close(p: *Pages, slot: u32) void {
         if (!p.paged(slot) or !p.used[slot]) return;
         const st = &p.e.seqs.items[slot].?.st;
         st.pages = &.{};
         st.capacity = 0;
         p.used[slot] = false;
+        if (p.shard) |x| { // port note (af9777b49): gate 5 — the shard's slot closes its own tables
+            st.lpages = &.{};
+            st.hold = null;
+            x.parts.close(slot);
+            x.lids[slot].clearRetainingCapacity();
+            return;
+        }
         if (kv_host.active) |*g| g.invalidate(p.e.stream) catch {};
         if (!p.leader) return p.leases[slot].ids.clearRetainingCapacity();
         p.pool.finish(&p.leases[slot]);
