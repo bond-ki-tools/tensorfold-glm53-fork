@@ -253,7 +253,7 @@ fn attendLastRow(k: Kernels, stream: cuda.Stream, l: Layer, c: Caches, s: Scratc
     const scale: f32 = @floatCast(std.math.pow(f64, @floatFromInt(l.qk), -0.5));
     if (host_pos < l.dense_limit) { // the same keys today's whole-chunk call read for this row
         var stamp = prof.span(k.prof, stream, .mla);
-        try latent.attentionFormat(k.set, stream, v.qa, c.lc, c.ls, .{ .pt = c.pt, .ps = c.ps }, at, v.partials, v.ol, v.dummy, 1, l.heads, l.lw, nch, scale, latent.headBlock(rows));
+        try latent.attentionFormat(k.set, stream, v.qa, c.lc, c.ls, .{ .pt = c.latPt(), .ps = c.latPs() }, at, v.partials, v.ol, v.dummy, 1, l.heads, l.lw, nch, scale, latent.headBlock(rows)); // port note (af9777b49): the latent's own table under the shard (was the keys' pt/ps — wrong pages from the second page on)
         stamp.end();
     }
     if (sparseRows(l, host_pos, rows)) {
@@ -281,7 +281,7 @@ fn denseAttention(k: Kernels, stream: cuda.Stream, l: Layer, c: Caches, s: Scrat
             at = s.at;
         }
         const off = r0 * l.heads * l.lw * 2;
-        try latent.attentionFormat(k.set, stream, s.qa + off, c.lc, c.ls, .{ .pt = c.pt, .ps = c.ps }, at, s.partials, s.ol + off, s.dummy, n, l.heads, l.lw, nch, scale, hb);
+        try latent.attentionFormat(k.set, stream, s.qa + off, c.lc, c.ls, .{ .pt = c.latPt(), .ps = c.latPs() }, at, s.partials, s.ol + off, s.dummy, n, l.heads, l.lw, nch, scale, hb); // port note (af9777b49): the latent's own table under the shard
     }
 }
 
