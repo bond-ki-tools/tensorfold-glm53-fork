@@ -17,7 +17,7 @@ pub fn tableLen(capacity: usize) usize {
 
 /// What a stream of engine `e` holds: its fixed part and table (and `extra`, its other buffers), 13,056 bytes a token.
 pub fn layout(gpa: std.mem.Allocator, e: *const Engine, extra: u64) !kv.Layout {
-    const fixed = try state.State.pagedBytes(gpa, &e.w, e.capacity, tableLen(e.capacity));
+    const fixed = try state.State.pagedBytes(gpa, &e.w, e.capacity, tableLen(e.capacity), e.settings.kv_shard.on);
     // TF_GLM_KV_HOST: a page costs the device only its pooled keys (the pages themselves are in host memory)
     const page = if (kv_host.onHost()) state.pkPageBytes(&e.w) else state.pageBytes(&e.w);
     return .{ .fixed_bytes = fixed + extra, .token_bytes = page / state.page_rows, .page_tokens = state.page_rows, .snap_bytes = 0 };
