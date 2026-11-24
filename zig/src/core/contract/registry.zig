@@ -478,6 +478,7 @@ test {
     _ = @import("qwen4_cuda_receipts_test.zig");
     _ = @import("moss_image_cuda_records.zig");
     _ = @import("glm_kv_pending.zig");
+    _ = @import("glm_kv_paged_records.zig"); // port note (af9777b49, after v57 0020)
     _ = @import("glm_launch_records.zig");
     _ = @import("minimax_cuda_records.zig");
     _ = @import("glm_f32w_pending.zig");

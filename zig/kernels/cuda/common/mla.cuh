@@ -44,7 +44,10 @@ constexpr int wide_smem() {
 }
 
 // RW roped columns (Ling's 64) follow the latent in q and keys; SPLIT: block z is chunk z * sw + sr, keys page z.
-template <int HB, bool FP8 = false, int RW = 0, bool SPLIT = false>
+// port note (af9777b49, after v57 0017): PAGED8 — an E4M3 cache on KV pages (pt, pstep bytes apart): a dense chunk
+// is one page (its base found from the table), a sparse key's logical token goes through the table to its page; codes
+// and scales then load as on a window, so the attention math is the window's.
+template <int HB, bool FP8 = false, int RW = 0, bool SPLIT = false, bool PAGED8 = false>
 __device__ void chunks_wide(const __nv_bfloat16* qa, const __nv_bfloat16* lc, const int* pos, const int* tok,
                             const int* cnt, float* po, float* pm, float* pl, int64_t rows, int64_t heads, int64_t w,
                             float scale, int sparse, const int* pt, int64_t pstep, const float* scales = nullptr,
@@ -77,11 +80,19 @@ __device__ void chunks_wide(const __nv_bfloat16* qa, const __nv_bfloat16* lc, co
       const int64_t src = ok ? (sparse ? (int64_t)tok[r * w + ki] : ki) : 0;
       if constexpr (FP8) {
         const unsigned char* codes = reinterpret_cast<const unsigned char*>(lc);
-        const float row_scale = ok ? scales[src] : 1.0f;
+        // port note (af9777b49, after v57 0017): on pages the codes and scales live in the key's page — a dense
+        // chunk is one page (pt[c], found per chunk), a sparse key's page through the table per key.
+        const int64_t at_page = PAGED8 ? (sparse ? (ok ? (int64_t)pt[src / CH] * pstep : 0)
+                                                 : (live ? (int64_t)pt[c] * pstep : 0)) : 0;
+        const int64_t prow = PAGED8 ? src % CH : src;
+        const unsigned char* row_at = PAGED8 ? codes + at_page + prow * LW : codes + src * LW;
+        const float* row_scale_at = PAGED8
+            ? reinterpret_cast<const float*>(reinterpret_cast<const unsigned char*>(scales) + at_page) + prow
+            : scales + src;
+        const float row_scale = ok ? (PAGED8 ? __ldg(row_scale_at) : scales[src]) : 1.0f;
 #pragma unroll
         for (int j = 0; j < 8; j += 2) {
-          const uint16_t bits = ok ? (uint16_t)codes[src * LW + u * 8 + j] |
-                                        ((uint16_t)codes[src * LW + u * 8 + j + 1] << 8) : 0;
+          const uint16_t bits = ok ? (uint16_t)row_at[u * 8 + j] | ((uint16_t)row_at[u * 8 + j + 1] << 8) : 0;
           const float2 v = __half22float2(__half2(__nv_cvt_fp8x2_to_halfraw2(bits, __NV_E4M3)));
           dst[wide(key, u) + j] = __float2bfloat16_rn(__fmul_rn(v.x, row_scale));
           dst[wide(key, u) + j + 1] = __float2bfloat16_rn(__fmul_rn(v.y, row_scale));

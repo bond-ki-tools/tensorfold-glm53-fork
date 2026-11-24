@@ -102,6 +102,7 @@ pub const landed_cuda = registry.cuda ++ @import("muse_cuda_records.zig").cuda +
     @import("joint_cuda_records.zig").records ++
     registry.glm_pending.sampling ++
     @import("glm_kv_pending.zig").records ++
+    @import("glm_kv_paged_records.zig").cuda ++ // port note (af9777b49, after v57 0020): the E4M3-on-pages launches
     @import("mla_cuda_records.zig").records ++
     @import("exl3_grouped_records.zig").records ++
     @import("proposal_sampling_records.zig").records ++

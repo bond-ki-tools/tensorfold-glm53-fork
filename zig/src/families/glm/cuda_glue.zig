@@ -52,6 +52,7 @@ pub const Kernels = struct {
     expand_v: cuda.Function,
     lat_write: cuda.Function,
     lat_write_fp8: cuda.Function,
+    lat_write_fp8_paged: cuda.Function, // port note (af9777b49, after v57 0017/0021): the E4M3-on-pages write
     index_write: cuda.Function,
     pool_keys: cuda.Function,
     select_rows: cuda.Function,
@@ -70,6 +71,8 @@ pub const Kernels = struct {
     chunks_32: cuda.Function,
     chunks_16_fp8: cuda.Function,
     chunks_32_fp8: cuda.Function,
+    chunks_16_fp8_paged: cuda.Function, // port note (af9777b49, after v57 0017/0021): the E4M3-on-pages chunks
+    chunks_32_fp8_paged: cuda.Function,
     merge: cuda.Function,
     scores: cuda.Function,
 
@@ -82,6 +85,8 @@ pub const Kernels = struct {
         try k.chunks_32.allowDynamicShared(chunksSmem(32));
         try k.chunks_16_fp8.allowDynamicShared(chunksSmem(16));
         try k.chunks_32_fp8.allowDynamicShared(chunksSmem(32));
+        try k.chunks_16_fp8_paged.allowDynamicShared(chunksSmem(16)); // port note (af9777b49, after v57 0021)
+        try k.chunks_32_fp8_paged.allowDynamicShared(chunksSmem(32));
         return k;
     }
 };
