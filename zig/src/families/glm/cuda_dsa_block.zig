@@ -152,12 +152,13 @@ pub fn attend(k: Kernels, stream: cuda.Stream, l: Layer, c: Caches, s: Scratch, 
     const t, const tk = try tables(l, c);
     const scale: f32 = @floatCast(std.math.pow(f64, @floatFromInt(l.qk), -0.5));
     if (host_pos < l.dense_limit) {
+        const dense_rows = @min(rows, l.dense_limit - host_pos); // port note (af9777b49, after upstream ff64ef9d9 / #4499): a chunk crossing the dense limit attends densely only to its rows below the limit — the rows past it belong to the sparse pass, and the dense read into them faulted the device (CudaContextLost on the follower at big prompts)
         const stamp = prof.span(k.prof, stream, .mla);
         var dc = c;
         if (c.pks != 0) if (kv_host.active) |*g| { // host rows: the visible ones, in order, into the slots
             dc = .{ .lc = try g.visible(k.ops, stream, c.lc, c.pt, t.page_rows, pos, rows, l.dense_limit + rows), .ik = c.ik, .ig = c.ig, .pk = c.pk, .pk_rows = c.pk_rows };
         };
-        try denseAttention(k, stream, l, dc, v, pos, rows, nch, part_rows, scale);
+        try denseAttention(k, stream, l, dc, v, pos, dense_rows, nch, part_rows, scale, latent.headBlock(rows)); // the head block stays the full chunk's
         stamp.end();
     }
     if (sparseRows(l, host_pos, rows)) {
@@ -199,8 +200,9 @@ pub fn attendOnly(k: Kernels, stream: cuda.Stream, l: Layer, c: Caches, s: Scrat
     v.ol = ol;
     const scale: f32 = @floatCast(std.math.pow(f64, @floatFromInt(l.qk), -0.5));
     if (host_pos < l.dense_limit) {
+        const dense_rows = @min(rows, l.dense_limit - host_pos); // port note (af9777b49, after upstream ff64ef9d9): the dense pass stops at the dense limit here too
         const stamp = prof.span(k.prof, stream, .mla);
-        try denseAttention(k, stream, l, c, v, pos, rows, nch, part_rows, scale);
+        try denseAttention(k, stream, l, c, v, pos, dense_rows, nch, part_rows, scale, latent.headBlock(rows));
         stamp.end();
     }
     if (sparseRows(l, host_pos, rows)) {
@@ -266,8 +268,7 @@ fn attendLastRow(k: Kernels, stream: cuda.Stream, l: Layer, c: Caches, s: Scratc
 }
 
 /// forward.dense_attention: latent.attention in `part_rows`-row blocks, each at its first row's position.
-fn denseAttention(k: Kernels, stream: cuda.Stream, l: Layer, c: Caches, s: Scratch, pos: u64, rows: usize, nch: usize, part_rows: usize, scale: f32) !void {
-    const hb = latent.headBlock(rows);
+fn denseAttention(k: Kernels, stream: cuda.Stream, l: Layer, c: Caches, s: Scratch, pos: u64, rows: usize, nch: usize, part_rows: usize, scale: f32, hb: usize) !void { // port note (af9777b49, after upstream ff64ef9d9): the head block comes from the caller's full row count
     var r0: usize = 0;
     while (r0 < rows) : (r0 += part_rows) {
         const n = @min(part_rows, rows - r0);
