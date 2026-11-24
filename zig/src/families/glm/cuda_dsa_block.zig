@@ -287,8 +287,14 @@ fn denseAttention(k: Kernels, stream: cuda.Stream, l: Layer, c: Caches, s: Scrat
 
 /// A cache's tables: latent rows `t`, and pooled keys `tk` (on their own device pages under TF_GLM_KV_HOST).
 fn tables(l: Layer, c: Caches) !struct { latent.Table, latent.Table } {
-    if (c.ps % (l.lw * 2) != 0) return error.LatentShape; // pages whole latent rows apart (the token lists' unit)
-    const t: latent.Table = .{ .pt = c.pt, .ps = c.ps, .page_rows = c.ps / (l.lw * 2) };
+    // port note (af9777b49): under the shard the latent rows live on their own pages — their table is lpt/lps
+    // (gate 5d), the keys' pt/ps. The attention and the latent write read with the keys' table before, so from
+    // the second page on they loaded wrong pages (garbage answers over prompts of two or more pages).
+    const lpt = c.latPt();
+    const lps = c.latPs();
+    if (lps % (l.lw * 2) != 0 and lps % (l.lw + 4) != 0) return error.LatentShape; // bf16 whole rows, or E4M3 codes plus scales
+    const rows_a_page = if (lps % (l.lw * 2) == 0) lps / (l.lw * 2) else lps / (l.lw + 4);
+    const t: latent.Table = .{ .pt = lpt, .ps = lps, .page_rows = rows_a_page };
     return .{ t, .{ .pt = c.pt, .ps = if (c.pks != 0) c.pks else c.ps, .page_rows = t.page_rows } };
 }
 
