@@ -194,6 +194,12 @@ pub const Leader = struct {
         try x.flush();
         const c = sampler.check(s);
         var h: Header = .{ .kind = @backingInt(Kind.begin), .a = kept };
+        // port note (af9777b49, after v57's 0114): gate 5b's follower splits the wire by this depth — the twin ids
+        // ride the begin step's tail. Without the setter it stayed 0 and the follower read the twin ids as the
+        // stream's own (KvShardPlacement on every follower map).
+        if (x.e.settings.kv_shard.on) if (x.e.pages) |p| { // TF_GLM_KV_SHARD: the last ids are its twin's
+            h.depth = @intCast(p.twinCount(x.e.slot));
+        };
         if (c) |v| {
             h.flags = 1;
             h.seed = v.seed;
