@@ -73,6 +73,7 @@ Each release's page on GitHub has its notes and measurements. See [the 1.0.0 rel
 ## 1.3.7
 
 - Metal: source rewriters no longer give a kernel a second threadgroup-size attribute, which made the M5 compiler refuse whole libraries (Flash Next's SSD 4-bit group-32 prompt path among them) (#5376).
+- GLM-5.3-Flash on CUDA: saved conversations can keep only the live KDA half with `TF_GLM_KV_LIVE_HALF=1`; whole images retain their format, and a mismatched image form is refused before state payloads load (refs #4871).
 
 - Hy4 Flash CUDA gains its FP8 Engram kernels with kernel-contract gates, controls and five-SM launch limits (slice 2b of #4795) (#5087). Thanks to @GrgaPalcic.
 
